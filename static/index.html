@@ -3,16 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>50×50 Sandbox</title>
+<title>TRPG Board</title>
 <style>
   :root {
     --bg: #f4f4f2; --panel: #ffffff; --text: #222; --muted: #777;
     --board: #fbfbf8; --grid: #e2e2dc; --grid-major: #c4c4bb; --accent: #2f6fde;
+    --ok: #30a46c; --ng: #e5484d;
+    --t-wall: #55555a; --t-water: #8cbbe8; --t-rough: #d4c09a; --t-high: #a8cf9f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #17181a; --panel: #222326; --text: #e8e8e8; --muted: #999;
       --board: #1d1e21; --grid: #2c2d31; --grid-major: #44464c; --accent: #6b9bff;
+      --t-wall: #8a8a90; --t-water: #2f5f8f; --t-rough: #6e5d3d; --t-high: #3f6b45;
     }
   }
   * { box-sizing: border-box; }
@@ -23,181 +26,348 @@
     padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--grid); }
   header h1 { font-size: 15px; margin: 0 8px 0 0; }
   .group { display: flex; gap: 6px; align-items: center; }
+  .group[hidden] { display: none; }
+  label { white-space: nowrap; }
   .swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
   .swatch.active { border-color: var(--text); }
+  .tile { min-width: 28px; height: 26px; border-radius: 5px; border: 2px solid transparent;
+    cursor: pointer; padding: 0 6px; font: inherit; font-size: 12px; color: #fff; text-shadow: 0 0 2px #000; }
+  .tile.active { border-color: var(--text); }
+  .tile.floor { background: var(--board); color: var(--text); text-shadow: none; outline: 1px solid var(--grid-major); }
+  .seg { display: inline-flex; border: 1px solid var(--grid-major); border-radius: 6px; overflow: hidden; }
+  .seg button { background: transparent; color: var(--text); border: 0; padding: 4px 12px; cursor: pointer; font: inherit; }
+  .seg button.active { background: var(--accent); color: #fff; }
   button.btn { background: transparent; color: var(--text); border: 1px solid var(--grid-major);
     border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
   button.btn:hover { border-color: var(--accent); }
-  input[type=text] { width: 48px; font: inherit; padding: 3px 6px; border-radius: 6px;
+  input[type=text] { width: 96px; font: inherit; padding: 3px 6px; border-radius: 6px;
     border: 1px solid var(--grid-major); background: var(--board); color: var(--text); }
   #wrap { flex: 1; position: relative; overflow: hidden; }
   canvas { display: block; width: 100%; height: 100%; touch-action: none; }
   #status { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px;
-    background: var(--panel); padding: 4px 8px; border-radius: 6px; opacity: .9; pointer-events: none; }
+    background: var(--panel); padding: 4px 8px; border-radius: 6px; opacity: .92; pointer-events: none; }
+  #conn { font-size: 12px; display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  #conn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--ng); }
+  #conn.on::before { background: var(--ok); }
+  #toast { position: absolute; right: 12px; bottom: 10px; background: var(--ng); color: #fff;
+    padding: 6px 10px; border-radius: 6px; font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: 1; }
   .hint { color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>50×50 Sandbox</h1>
-  <div class="group" id="palette"></div>
-  <div class="group"><label for="label">ラベル</label><input id="label" type="text" maxlength="2" placeholder="A"></div>
-  <div class="group">
-    <button class="btn" id="fit">全体表示</button>
-    <button class="btn" id="clear">全消去</button>
-    <button class="btn" id="export">書き出し</button>
-    <button class="btn" id="import">読み込み</button>
+  <h1>TRPG Board</h1>
+  <div class="seg" id="modes">
+    <button data-mode="piece" class="active">コマ</button>
+    <button data-mode="terrain">地形</button>
   </div>
-  <span class="hint">空きマスをクリック:配置 / ドラッグ:移動 / 右クリック・ダブルクリック:削除 / 空白ドラッグ:スクロール / ホイール:拡大縮小</span>
+  <div class="group" id="pieceTools">
+    <div class="group" id="palette"></div>
+    <label for="name">名前</label><input id="name" type="text" maxlength="32" placeholder="ニンジャA">
+  </div>
+  <div class="group" id="terrainTools" hidden></div>
+  <button class="btn" id="fit">全体表示</button>
+  <span id="conn">未接続</span>
+  <span class="hint" id="hint"></span>
 </header>
-<div id="wrap"><canvas id="cv"></canvas><div id="status"></div></div>
-<input type="file" id="file" accept="application/json" hidden>
+<div id="wrap"><canvas id="cv"></canvas><div id="status"></div><div id="toast"></div></div>
 
 <script>
-const N = 50;
 const COLORS = ["#e5484d", "#2f6fde", "#30a46c", "#f5a524", "#8e4ec6", "#444444"];
-const STORE_KEY = "sandbox50.pieces";
+const TERRAINS = [
+  { id: null, label: "床" },
+  { id: "wall", label: "壁" },
+  { id: "water", label: "水" },
+  { id: "rough", label: "悪路" },
+  { id: "high", label: "高台" },
+];
+const HINTS = {
+  piece: "空きマスをクリック:配置 / ドラッグ:移動 / 右クリック・ダブルクリック:削除 / 空白ドラッグ・右ドラッグ:スクロール / ホイール:拡大縮小",
+  terrain: "ドラッグ:塗る / 右ドラッグ:スクロール / ホイール:拡大縮小",
+};
 
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 const statusEl = document.getElementById("status");
-const labelInput = document.getElementById("label");
+const connEl = document.getElementById("conn");
+const toastEl = document.getElementById("toast");
+const nameInput = document.getElementById("name");
 
-let pieces = load();                 // {id, x, y, color, label}
-let nextId = pieces.reduce((m, p) => Math.max(m, p.id), 0) + 1;
+// 盤面の状態(サーバーから受け取る)
+let board = null;                    // {width, height}
+const entities = new Map();          // id -> entity
+const terrain = new Map();           // "x,y" -> type
+
+let mode = "piece";
 let color = COLORS[0];
+let brush = "wall";
 const view = { scale: 16, ox: 0, oy: 0 };  // screen = cell * scale + offset
-let hover = null;                    // {x, y}
-let drag = null;                     // {type: "piece"|"pan", ...}
+let hover = null;
+let drag = null;
+let clients = 0;
 
-// ---- palette ----
+// ---- ツールバー ----
 const paletteEl = document.getElementById("palette");
 COLORS.forEach((c, i) => {
   const b = document.createElement("button");
   b.className = "swatch" + (i === 0 ? " active" : "");
   b.style.background = c;
   b.title = c;
-  b.onclick = () => {
-    color = c;
-    paletteEl.querySelectorAll(".swatch").forEach(s => s.classList.toggle("active", s === b));
-  };
+  b.onclick = () => { color = c; select(paletteEl, b); };
   paletteEl.appendChild(b);
 });
-
-// ---- persistence ----
-function load() {
-  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch { return []; }
+const terrainEl = document.getElementById("terrainTools");
+TERRAINS.forEach(t => {
+  const b = document.createElement("button");
+  b.className = "tile" + (t.id === null ? " floor" : "") + (t.id === brush ? " active" : "");
+  b.textContent = t.label;
+  if (t.id) b.style.background = `var(--t-${t.id})`;
+  b.onclick = () => { brush = t.id; select(terrainEl, b); };
+  terrainEl.appendChild(b);
+});
+function select(parent, btn) {
+  parent.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === btn));
 }
-function save() {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(pieces)); } catch {}
+const modesEl = document.getElementById("modes");
+modesEl.querySelectorAll("button").forEach(b => b.onclick = () => setMode(b.dataset.mode));
+function setMode(m) {
+  mode = m;
+  select(modesEl, modesEl.querySelector(`[data-mode="${m}"]`));
+  document.getElementById("pieceTools").hidden = m !== "piece";
+  terrainEl.hidden = m !== "terrain";
+  document.getElementById("hint").textContent = HINTS[m];
+  draw();
+}
+document.getElementById("fit").onclick = fit;
+
+let toastTimer;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2500);
 }
 
-// ---- geometry ----
+// ---- 通信 ----
+let ws = null;
+let retry = 0;
+function connect() {
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  ws.onopen = () => { retry = 0; };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => {
+    ws = null;
+    setConn(false);
+    setTimeout(connect, Math.min(10000, 500 * 2 ** retry++));
+  };
+}
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify(msg)); return true; }
+  toast("サーバーに接続されていません");
+  return false;
+}
+function setConn(on) {
+  connEl.classList.toggle("on", on);
+  connEl.textContent = on ? `接続中・${clients} 人` : "切断(再接続中…)";
+}
+
+function handle(msg) {
+  switch (msg.type) {
+    case "snapshot": {
+      const first = board === null;
+      board = { width: msg.board.width, height: msg.board.height };
+      entities.clear();
+      msg.board.entities.forEach(e => entities.set(e.id, e));
+      terrain.clear();
+      msg.board.terrain.forEach(c => terrain.set(`${c.x},${c.y}`, c.terrain));
+      setConn(true);
+      if (first) fit();
+      break;
+    }
+    case "entity.created":
+    case "entity.updated":
+      entities.set(msg.entity.id, msg.entity);
+      break;
+    case "entity.deleted":
+      entities.delete(msg.id);
+      break;
+    case "terrain.painted":
+      msg.cells.forEach(c => setTerrain(c.x, c.y, c.terrain));
+      break;
+    case "presence":
+      clients = msg.clients;
+      setConn(true);
+      break;
+    case "error":
+      toast(msg.message);
+      break;
+  }
+  draw();
+}
+
+function* cellsBetween(a, b) {
+  const n = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+  for (let i = 1; i <= n; i++) {
+    yield { x: Math.round(a.x + (b.x - a.x) * i / n), y: Math.round(a.y + (b.y - a.y) * i / n) };
+  }
+}
+
+function setTerrain(x, y, t) {
+  if (t) terrain.set(`${x},${y}`, t); else terrain.delete(`${x},${y}`);
+}
+
+// 地形はドラッグ中に溜めて少しずつ送る
+let paintQueue = [];
+let paintTimer = null;
+function queuePaint(cell) {
+  const key = `${cell.x},${cell.y}`;
+  if ((terrain.get(key) ?? null) === brush) return;
+  setTerrain(cell.x, cell.y, brush);
+  paintQueue.push({ x: cell.x, y: cell.y, terrain: brush });
+  if (!paintTimer) paintTimer = setTimeout(flushPaint, 60);
+}
+function flushPaint() {
+  paintTimer = null;
+  if (!paintQueue.length) return;
+  send({ op: "terrain.paint", data: { cells: paintQueue } });
+  paintQueue = [];
+}
+
+// ---- 座標 ----
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
 function toCell(sx, sy) {
   return { x: Math.floor((sx - view.ox) / view.scale), y: Math.floor((sy - view.oy) / view.scale) };
 }
-function inBoard(c) { return c.x >= 0 && c.y >= 0 && c.x < N && c.y < N; }
-function pieceAt(x, y) { return pieces.find(p => p.x === x && p.y === y); }
+function inBoard(c) { return board && c.x >= 0 && c.y >= 0 && c.x < board.width && c.y < board.height; }
+function entityAt(x, y) {
+  for (const e of entities.values()) if (e.x === x && e.y === y) return e;
+  return null;
+}
 function eventPos(e) {
   const r = cv.getBoundingClientRect();
   return { sx: e.clientX - r.left, sy: e.clientY - r.top };
 }
 
+let fitted = false;
 function resize() {
   const dpr = window.devicePixelRatio || 1;
   const r = cv.getBoundingClientRect();
   cv.width = r.width * dpr; cv.height = r.height * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (!fitted && r.width > 0 && r.height > 0) { fitted = true; fit(); } else draw();
+  if (!fitted && board && r.width > 0) fit(); else draw();
 }
-let fitted = false;
 function fit() {
   const r = cv.getBoundingClientRect();
-  view.scale = Math.max(4, Math.floor(Math.min(r.width, r.height) * 0.94 / N));
-  view.ox = (r.width - N * view.scale) / 2;
-  view.oy = (r.height - N * view.scale) / 2;
+  if (!board || r.width === 0) return;
+  fitted = true;
+  const n = Math.max(board.width, board.height);
+  view.scale = Math.max(4, Math.floor(Math.min(r.width, r.height) * 0.94 / n));
+  view.ox = (r.width - board.width * view.scale) / 2;
+  view.oy = (r.height - board.height * view.scale) / 2;
   draw();
 }
 
-// ---- rendering ----
+// ---- 描画 ----
 function draw() {
   const r = cv.getBoundingClientRect();
-  const s = view.scale;
   ctx.clearRect(0, 0, r.width, r.height);
+  if (!board) {
+    statusEl.textContent = "サーバーに接続しています…";
+    return;
+  }
+  const s = view.scale, W = board.width, H = board.height;
 
   ctx.fillStyle = css("--board");
-  ctx.fillRect(view.ox, view.oy, N * s, N * s);
+  ctx.fillRect(view.ox, view.oy, W * s, H * s);
 
-  // grid
+  // 地形
+  const tColors = {};
+  for (const t of TERRAINS) if (t.id) tColors[t.id] = css(`--t-${t.id}`);
+  for (const [key, t] of terrain) {
+    const [x, y] = key.split(",").map(Number);
+    ctx.fillStyle = tColors[t];
+    ctx.fillRect(view.ox + x * s, view.oy + y * s, s, s);
+  }
+
+  // グリッド
   const minor = css("--grid"), major = css("--grid-major");
-  for (let i = 0; i <= N; i++) {
+  for (let i = 0; i <= Math.max(W, H); i++) {
     const isMajor = i % 10 === 0;
     if (!isMajor && s < 6) continue;
     ctx.strokeStyle = isMajor ? major : minor;
     ctx.lineWidth = isMajor ? 1.2 : 1;
     const p = Math.round(i * s) + 0.5;
     ctx.beginPath();
-    ctx.moveTo(view.ox + p, view.oy); ctx.lineTo(view.ox + p, view.oy + N * s);
-    ctx.moveTo(view.ox, view.oy + p); ctx.lineTo(view.ox + N * s, view.oy + p);
+    if (i <= W) { ctx.moveTo(view.ox + p, view.oy); ctx.lineTo(view.ox + p, view.oy + H * s); }
+    if (i <= H) { ctx.moveTo(view.ox, view.oy + p); ctx.lineTo(view.ox + W * s, view.oy + p); }
     ctx.stroke();
   }
 
-  // hover / drop target
+  // カーソル位置・移動先
   const target = drag?.type === "piece" ? drag.target : hover;
   if (target && inBoard(target)) {
-    const blocked = drag?.type === "piece" && pieceAt(target.x, target.y) && pieceAt(target.x, target.y) !== drag.piece;
-    ctx.fillStyle = blocked ? "rgba(229,72,77,.25)" : "rgba(47,111,222,.18)";
+    const other = entityAt(target.x, target.y);
+    const blocked = drag?.type === "piece" && other && other !== drag.entity;
+    ctx.fillStyle = blocked ? "rgba(229,72,77,.3)" : "rgba(47,111,222,.2)";
     ctx.fillRect(view.ox + target.x * s, view.oy + target.y * s, s, s);
   }
 
-  // pieces
-  for (const p of pieces) {
-    if (drag?.type === "piece" && drag.piece === p && drag.moved) continue;
-    drawPiece(p, view.ox + (p.x + .5) * s, view.oy + (p.y + .5) * s, 1);
+  // コマ
+  for (const e of entities.values()) {
+    if (drag?.type === "piece" && drag.entity.id === e.id && drag.moved) continue;
+    drawEntity(e, view.ox + (e.x + .5) * s, view.oy + (e.y + .5) * s, 1);
   }
-  if (drag?.type === "piece" && drag.moved) {
-    drawPiece(drag.piece, drag.sx, drag.sy, 0.85);
-  }
+  if (drag?.type === "piece" && drag.moved) drawEntity(drag.entity, drag.sx, drag.sy, 0.85);
 
-  const c = hover && inBoard(hover) ? `(${hover.x}, ${hover.y})` : "—";
-  statusEl.textContent = `マス ${c} ・ コマ ${pieces.length} 個 ・ 倍率 ${s.toFixed(0)}px`;
+  let info = "—";
+  if (hover && inBoard(hover)) {
+    info = `(${hover.x}, ${hover.y})`;
+    const t = terrain.get(`${hover.x},${hover.y}`);
+    if (t) info += " " + TERRAINS.find(x => x.id === t).label;
+    const e = entityAt(hover.x, hover.y);
+    if (e) info += ` ・ ${e.name || "(名前なし)"}`;
+  }
+  statusEl.textContent = `マス ${info} ・ コマ ${entities.size} 個`;
 }
 
-function drawPiece(p, cx, cy, alpha) {
+function drawEntity(e, cx, cy, alpha) {
   const rad = view.scale * 0.4;
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = p.color;
+  ctx.fillStyle = e.color;
   ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = "rgba(0,0,0,.25)"; ctx.lineWidth = 1; ctx.stroke();
-  if (p.label && view.scale >= 12) {
+  ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.lineWidth = 1; ctx.stroke();
+  const label = [...(e.name || "")].slice(0, 2).join("");
+  if (label && view.scale >= 12) {
     ctx.fillStyle = "#fff";
-    ctx.font = `bold ${Math.round(rad * (p.label.length > 1 ? 0.9 : 1.2))}px system-ui, sans-serif`;
+    ctx.font = `bold ${Math.round(rad * (label.length > 1 ? 0.9 : 1.2))}px system-ui, sans-serif`;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(p.label, cx, cy + 1);
+    ctx.fillText(label, cx, cy + 1);
   }
   ctx.globalAlpha = 1;
 }
 
-// ---- input ----
+// ---- 入力 ----
 cv.addEventListener("contextmenu", e => e.preventDefault());
 
 cv.addEventListener("pointerdown", e => {
+  if (!board) return;
   const { sx, sy } = eventPos(e);
   const cell = toCell(sx, sy);
   cv.setPointerCapture(e.pointerId);
+  const pan = { type: "pan", startX: sx, startY: sy, ox: view.ox, oy: view.oy, moved: false, cell, button: e.button };
 
-  if (e.button === 2) {                       // right click: delete
-    const p = inBoard(cell) && pieceAt(cell.x, cell.y);
-    if (p) { pieces = pieces.filter(q => q !== p); save(); draw(); }
+  if (e.button !== 0) { drag = pan; return; }
+  if (mode === "terrain") {
+    drag = { type: "paint", startX: sx, startY: sy, last: cell };
+    if (inBoard(cell)) queuePaint(cell);
+    draw();
     return;
   }
-  const p = e.button === 0 && inBoard(cell) && pieceAt(cell.x, cell.y);
-  if (p) {
-    drag = { type: "piece", piece: p, startX: sx, startY: sy, sx, sy, target: cell, moved: false };
-  } else {
-    drag = { type: "pan", startX: sx, startY: sy, ox: view.ox, oy: view.oy, moved: false, cell, button: e.button };
-  }
+  const ent = inBoard(cell) && entityAt(cell.x, cell.y);
+  drag = ent
+    ? { type: "piece", entity: ent, startX: sx, startY: sy, sx, sy, target: cell, moved: false }
+    : pan;
 });
 
 cv.addEventListener("pointermove", e => {
@@ -207,6 +377,10 @@ cv.addEventListener("pointermove", e => {
     if (Math.hypot(sx - drag.startX, sy - drag.startY) > 4) drag.moved = true;
     if (drag.type === "piece") {
       drag.sx = sx; drag.sy = sy; drag.target = hover;
+    } else if (drag.type === "paint") {
+      // マウスが速いとマスが飛ぶので、前回のマスから直線で埋める
+      for (const c of cellsBetween(drag.last, hover)) if (inBoard(c)) queuePaint(c);
+      drag.last = hover;
     } else if (drag.moved) {
       view.ox = drag.ox + (sx - drag.startX);
       view.oy = drag.oy + (sy - drag.startY);
@@ -217,28 +391,40 @@ cv.addEventListener("pointermove", e => {
 
 cv.addEventListener("pointerup", () => {
   if (!drag) return;
-  if (drag.type === "piece" && drag.moved) {
-    const t = drag.target;
-    const other = inBoard(t) && pieceAt(t.x, t.y);
-    if (inBoard(t) && (!other || other === drag.piece)) {
-      drag.piece.x = t.x; drag.piece.y = t.y; save();
-    }
-  } else if (drag.type === "pan" && !drag.moved && drag.button === 0 && inBoard(drag.cell)) {
-    pieces.push({ id: nextId++, x: drag.cell.x, y: drag.cell.y, color, label: labelInput.value.trim() });
-    save();
-  }
+  const d = drag;
   drag = null;
+  if (d.type === "paint") {
+    flushPaint();
+  } else if (d.type === "piece" && d.moved) {
+    const t = d.target;
+    const other = inBoard(t) && entityAt(t.x, t.y);
+    if (inBoard(t) && !other && send({ op: "entity.update", id: d.entity.id, data: { x: t.x, y: t.y } })) {
+      d.entity.x = t.x; d.entity.y = t.y;   // 楽観的に動かし、拒否されたらスナップショットで戻る
+    }
+  } else if (d.type === "pan" && !d.moved && inBoard(d.cell)) {
+    const ent = entityAt(d.cell.x, d.cell.y);
+    if (d.button === 2 && ent) {
+      deleteEntity(ent);
+    } else if (d.button === 0 && mode === "piece" && !ent) {
+      send({ op: "entity.create", data: { x: d.cell.x, y: d.cell.y, color, name: nameInput.value.trim() } });
+    }
+  }
   draw();
 });
 
 cv.addEventListener("pointerleave", () => { if (!drag) { hover = null; draw(); } });
 
 cv.addEventListener("dblclick", e => {
+  if (mode !== "piece") return;
   const { sx, sy } = eventPos(e);
   const cell = toCell(sx, sy);
-  const p = inBoard(cell) && pieceAt(cell.x, cell.y);
-  if (p) { pieces = pieces.filter(q => q !== p); save(); draw(); }
+  const ent = inBoard(cell) && entityAt(cell.x, cell.y);
+  if (ent) deleteEntity(ent);
 });
+
+function deleteEntity(ent) {
+  if (send({ op: "entity.delete", id: ent.id })) { entities.delete(ent.id); draw(); }
+}
 
 cv.addEventListener("wheel", e => {
   e.preventDefault();
@@ -251,36 +437,10 @@ cv.addEventListener("wheel", e => {
   draw();
 }, { passive: false });
 
-// ---- toolbar ----
-document.getElementById("fit").onclick = fit;
-document.getElementById("clear").onclick = () => {
-  if (pieces.length && confirm("すべてのコマを消去しますか?")) { pieces = []; save(); draw(); }
-};
-document.getElementById("export").onclick = () => {
-  const blob = new Blob([JSON.stringify({ size: N, pieces }, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "board.json";
-  a.click();
-  URL.revokeObjectURL(a.href);
-};
-const fileInput = document.getElementById("file");
-document.getElementById("import").onclick = () => fileInput.click();
-fileInput.onchange = async () => {
-  const f = fileInput.files[0];
-  if (!f) return;
-  try {
-    const data = JSON.parse(await f.text());
-    pieces = (data.pieces || []).filter(p => inBoard(p));
-    nextId = pieces.reduce((m, p) => Math.max(m, p.id || 0), 0) + 1;
-    pieces.forEach(p => { if (!p.id) p.id = nextId++; });
-    save(); draw();
-  } catch { alert("JSON を読み込めませんでした"); }
-  fileInput.value = "";
-};
-
 new ResizeObserver(resize).observe(cv);
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+setMode("piece");
+connect();
 </script>
 </body>
 </html>

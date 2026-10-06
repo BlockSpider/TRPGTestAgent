@@ -1,6 +1,8 @@
-OMURA/
+irc_space/
 __pycache__/
 *.pyc
 *.sqlite3
 *.db
 .pytest_cache/
+data/
+.claude/launch.json
