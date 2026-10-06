@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>50×50 Sandbox</title>
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --text: #222; --muted: #777;
+    --board: #fbfbf8; --grid: #e2e2dc; --grid-major: #c4c4bb; --accent: #2f6fde;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a; --panel: #222326; --text: #e8e8e8; --muted: #999;
+      --board: #1d1e21; --grid: #2c2d31; --grid-major: #44464c; --accent: #6b9bff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+    padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--grid); }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; }
+  .group { display: flex; gap: 6px; align-items: center; }
+  .swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
+  .swatch.active { border-color: var(--text); }
+  button.btn { background: transparent; color: var(--text); border: 1px solid var(--grid-major);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  button.btn:hover { border-color: var(--accent); }
+  input[type=text] { width: 48px; font: inherit; padding: 3px 6px; border-radius: 6px;
+    border: 1px solid var(--grid-major); background: var(--board); color: var(--text); }
+  #wrap { flex: 1; position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #status { position: absolute; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px;
+    background: var(--panel); padding: 4px 8px; border-radius: 6px; opacity: .9; pointer-events: none; }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>50×50 Sandbox</h1>
+  <div class="group" id="palette"></div>
+  <div class="group"><label for="label">ラベル</label><input id="label" type="text" maxlength="2" placeholder="A"></div>
+  <div class="group">
+    <button class="btn" id="fit">全体表示</button>
+    <button class="btn" id="clear">全消去</button>
+    <button class="btn" id="export">書き出し</button>
+    <button class="btn" id="import">読み込み</button>
+  </div>
+  <span class="hint">空きマスをクリック:配置 / ドラッグ:移動 / 右クリック・ダブルクリック:削除 / 空白ドラッグ:スクロール / ホイール:拡大縮小</span>
+</header>
+<div id="wrap"><canvas id="cv"></canvas><div id="status"></div></div>
+<input type="file" id="file" accept="application/json" hidden>
+
+<script>
+const N = 50;
+const COLORS = ["#e5484d", "#2f6fde", "#30a46c", "#f5a524", "#8e4ec6", "#444444"];
+const STORE_KEY = "sandbox50.pieces";
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const statusEl = document.getElementById("status");
+const labelInput = document.getElementById("label");
+
+let pieces = load();                 // {id, x, y, color, label}
+let nextId = pieces.reduce((m, p) => Math.max(m, p.id), 0) + 1;
+let color = COLORS[0];
+const view = { scale: 16, ox: 0, oy: 0 };  // screen = cell * scale + offset
+let hover = null;                    // {x, y}
+let drag = null;                     // {type: "piece"|"pan", ...}
+
+// ---- palette ----
+const paletteEl = document.getElementById("palette");
+COLORS.forEach((c, i) => {
+  const b = document.createElement("button");
+  b.className = "swatch" + (i === 0 ? " active" : "");
+  b.style.background = c;
+  b.title = c;
+  b.onclick = () => {
+    color = c;
+    paletteEl.querySelectorAll(".swatch").forEach(s => s.classList.toggle("active", s === b));
+  };
+  paletteEl.appendChild(b);
+});
+
+// ---- persistence ----
+function load() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY)) || []; } catch { return []; }
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(pieces)); } catch {}
+}
+
+// ---- geometry ----
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function toCell(sx, sy) {
+  return { x: Math.floor((sx - view.ox) / view.scale), y: Math.floor((sy - view.oy) / view.scale) };
+}
+function inBoard(c) { return c.x >= 0 && c.y >= 0 && c.x < N && c.y < N; }
+function pieceAt(x, y) { return pieces.find(p => p.x === x && p.y === y); }
+function eventPos(e) {
+  const r = cv.getBoundingClientRect();
+  return { sx: e.clientX - r.left, sy: e.clientY - r.top };
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * dpr; cv.height = r.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!fitted && r.width > 0 && r.height > 0) { fitted = true; fit(); } else draw();
+}
+let fitted = false;
+function fit() {
+  const r = cv.getBoundingClientRect();
+  view.scale = Math.max(4, Math.floor(Math.min(r.width, r.height) * 0.94 / N));
+  view.ox = (r.width - N * view.scale) / 2;
+  view.oy = (r.height - N * view.scale) / 2;
+  draw();
+}
+
+// ---- rendering ----
+function draw() {
+  const r = cv.getBoundingClientRect();
+  const s = view.scale;
+  ctx.clearRect(0, 0, r.width, r.height);
+
+  ctx.fillStyle = css("--board");
+  ctx.fillRect(view.ox, view.oy, N * s, N * s);
+
+  // grid
+  const minor = css("--grid"), major = css("--grid-major");
+  for (let i = 0; i <= N; i++) {
+    const isMajor = i % 10 === 0;
+    if (!isMajor && s < 6) continue;
+    ctx.strokeStyle = isMajor ? major : minor;
+    ctx.lineWidth = isMajor ? 1.2 : 1;
+    const p = Math.round(i * s) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(view.ox + p, view.oy); ctx.lineTo(view.ox + p, view.oy + N * s);
+    ctx.moveTo(view.ox, view.oy + p); ctx.lineTo(view.ox + N * s, view.oy + p);
+    ctx.stroke();
+  }
+
+  // hover / drop target
+  const target = drag?.type === "piece" ? drag.target : hover;
+  if (target && inBoard(target)) {
+    const blocked = drag?.type === "piece" && pieceAt(target.x, target.y) && pieceAt(target.x, target.y) !== drag.piece;
+    ctx.fillStyle = blocked ? "rgba(229,72,77,.25)" : "rgba(47,111,222,.18)";
+    ctx.fillRect(view.ox + target.x * s, view.oy + target.y * s, s, s);
+  }
+
+  // pieces
+  for (const p of pieces) {
+    if (drag?.type === "piece" && drag.piece === p && drag.moved) continue;
+    drawPiece(p, view.ox + (p.x + .5) * s, view.oy + (p.y + .5) * s, 1);
+  }
+  if (drag?.type === "piece" && drag.moved) {
+    drawPiece(drag.piece, drag.sx, drag.sy, 0.85);
+  }
+
+  const c = hover && inBoard(hover) ? `(${hover.x}, ${hover.y})` : "—";
+  statusEl.textContent = `マス ${c} ・ コマ ${pieces.length} 個 ・ 倍率 ${s.toFixed(0)}px`;
+}
+
+function drawPiece(p, cx, cy, alpha) {
+  const rad = view.scale * 0.4;
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = p.color;
+  ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,.25)"; ctx.lineWidth = 1; ctx.stroke();
+  if (p.label && view.scale >= 12) {
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.round(rad * (p.label.length > 1 ? 0.9 : 1.2))}px system-ui, sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(p.label, cx, cy + 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- input ----
+cv.addEventListener("contextmenu", e => e.preventDefault());
+
+cv.addEventListener("pointerdown", e => {
+  const { sx, sy } = eventPos(e);
+  const cell = toCell(sx, sy);
+  cv.setPointerCapture(e.pointerId);
+
+  if (e.button === 2) {                       // right click: delete
+    const p = inBoard(cell) && pieceAt(cell.x, cell.y);
+    if (p) { pieces = pieces.filter(q => q !== p); save(); draw(); }
+    return;
+  }
+  const p = e.button === 0 && inBoard(cell) && pieceAt(cell.x, cell.y);
+  if (p) {
+    drag = { type: "piece", piece: p, startX: sx, startY: sy, sx, sy, target: cell, moved: false };
+  } else {
+    drag = { type: "pan", startX: sx, startY: sy, ox: view.ox, oy: view.oy, moved: false, cell, button: e.button };
+  }
+});
+
+cv.addEventListener("pointermove", e => {
+  const { sx, sy } = eventPos(e);
+  hover = toCell(sx, sy);
+  if (drag) {
+    if (Math.hypot(sx - drag.startX, sy - drag.startY) > 4) drag.moved = true;
+    if (drag.type === "piece") {
+      drag.sx = sx; drag.sy = sy; drag.target = hover;
+    } else if (drag.moved) {
+      view.ox = drag.ox + (sx - drag.startX);
+      view.oy = drag.oy + (sy - drag.startY);
+    }
+  }
+  draw();
+});
+
+cv.addEventListener("pointerup", () => {
+  if (!drag) return;
+  if (drag.type === "piece" && drag.moved) {
+    const t = drag.target;
+    const other = inBoard(t) && pieceAt(t.x, t.y);
+    if (inBoard(t) && (!other || other === drag.piece)) {
+      drag.piece.x = t.x; drag.piece.y = t.y; save();
+    }
+  } else if (drag.type === "pan" && !drag.moved && drag.button === 0 && inBoard(drag.cell)) {
+    pieces.push({ id: nextId++, x: drag.cell.x, y: drag.cell.y, color, label: labelInput.value.trim() });
+    save();
+  }
+  drag = null;
+  draw();
+});
+
+cv.addEventListener("pointerleave", () => { if (!drag) { hover = null; draw(); } });
+
+cv.addEventListener("dblclick", e => {
+  const { sx, sy } = eventPos(e);
+  const cell = toCell(sx, sy);
+  const p = inBoard(cell) && pieceAt(cell.x, cell.y);
+  if (p) { pieces = pieces.filter(q => q !== p); save(); draw(); }
+});
+
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  const { sx, sy } = eventPos(e);
+  const next = Math.min(80, Math.max(4, view.scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  const k = next / view.scale;
+  view.ox = sx - (sx - view.ox) * k;
+  view.oy = sy - (sy - view.oy) * k;
+  view.scale = next;
+  draw();
+}, { passive: false });
+
+// ---- toolbar ----
+document.getElementById("fit").onclick = fit;
+document.getElementById("clear").onclick = () => {
+  if (pieces.length && confirm("すべてのコマを消去しますか?")) { pieces = []; save(); draw(); }
+};
+document.getElementById("export").onclick = () => {
+  const blob = new Blob([JSON.stringify({ size: N, pieces }, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "board.json";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+const fileInput = document.getElementById("file");
+document.getElementById("import").onclick = () => fileInput.click();
+fileInput.onchange = async () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  try {
+    const data = JSON.parse(await f.text());
+    pieces = (data.pieces || []).filter(p => inBoard(p));
+    nextId = pieces.reduce((m, p) => Math.max(m, p.id || 0), 0) + 1;
+    pieces.forEach(p => { if (!p.id) p.id = nextId++; });
+    save(); draw();
+  } catch { alert("JSON を読み込めませんでした"); }
+  fileInput.value = "";
+};
+
+new ResizeObserver(resize).observe(cv);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+</script>
+</body>
+</html>
