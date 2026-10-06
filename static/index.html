@@ -10,12 +10,14 @@
     --board: #fbfbf8; --grid: #e2e2dc; --grid-major: #c4c4bb; --accent: #2f6fde;
     --ok: #30a46c; --ng: #e5484d;
     --t-wall: #55555a; --t-water: #8cbbe8; --t-rough: #d4c09a; --t-high: #a8cf9f;
+    --e-wall: #2b2b30; --e-window: #4fa3e0; --e-door: #9a6532;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #17181a; --panel: #222326; --text: #e8e8e8; --muted: #999;
       --board: #1d1e21; --grid: #2c2d31; --grid-major: #44464c; --accent: #6b9bff;
       --t-wall: #8a8a90; --t-water: #2f5f8f; --t-rough: #6e5d3d; --t-high: #3f6b45;
+      --e-wall: #d8d8dc; --e-window: #6cc0ff; --e-door: #d08a48;
     }
   }
   * { box-sizing: border-box; }
@@ -30,10 +32,10 @@
   label { white-space: nowrap; }
   .swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
   .swatch.active { border-color: var(--text); }
-  .tile { min-width: 28px; height: 26px; border-radius: 5px; border: 2px solid transparent;
-    cursor: pointer; padding: 0 6px; font: inherit; font-size: 12px; color: #fff; text-shadow: 0 0 2px #000; }
-  .tile.active { border-color: var(--text); }
-  .tile.floor { background: var(--board); color: var(--text); text-shadow: none; outline: 1px solid var(--grid-major); }
+  .tile { min-width: 32px; height: 28px; border-radius: 5px; border: 1px solid var(--grid-major);
+    border-bottom: 5px solid var(--swatch, var(--grid-major)); background: transparent;
+    cursor: pointer; padding: 0 8px; font: inherit; font-size: 12px; color: var(--text); }
+  .tile.active { outline: 2px solid var(--accent); outline-offset: 1px; }
   .seg { display: inline-flex; border: 1px solid var(--grid-major); border-radius: 6px; overflow: hidden; }
   .seg button { background: transparent; color: var(--text); border: 0; padding: 4px 12px; cursor: pointer; font: inherit; }
   .seg button.active { background: var(--accent); color: #fff; }
@@ -61,12 +63,14 @@
   <div class="seg" id="modes">
     <button data-mode="piece" class="active">コマ</button>
     <button data-mode="terrain">地形</button>
+    <button data-mode="edge">仕切り</button>
   </div>
   <div class="group" id="pieceTools">
     <div class="group" id="palette"></div>
     <label for="name">名前</label><input id="name" type="text" maxlength="32" placeholder="ニンジャA">
   </div>
   <div class="group" id="terrainTools" hidden></div>
+  <div class="group" id="edgeTools" hidden></div>
   <button class="btn" id="fit">全体表示</button>
   <span id="conn">未接続</span>
   <span class="hint" id="hint"></span>
@@ -82,9 +86,17 @@ const TERRAINS = [
   { id: "rough", label: "悪路" },
   { id: "high", label: "高台" },
 ];
+const EDGES = [
+  { id: null, label: "消す" },
+  { id: "wall", label: "壁" },
+  { id: "window", label: "窓" },
+  { id: "door", label: "扉" },
+  { id: "door_open", label: "扉(開)" },
+];
 const HINTS = {
-  piece: "空きマスをクリック:配置 / ドラッグ:移動 / 右クリック・ダブルクリック:削除 / 空白ドラッグ・右ドラッグ:スクロール / ホイール:拡大縮小",
+  piece: "空きマスをクリック:配置 / 扉をクリック:開閉 / ドラッグ:移動 / 右クリック・ダブルクリック:削除 / 空白ドラッグ・右ドラッグ:スクロール / ホイール:拡大縮小",
   terrain: "ドラッグ:塗る / 右ドラッグ:スクロール / ホイール:拡大縮小",
+  edge: "マスの境目をドラッグ:仕切りを引く(最初の向きに沿って直線) / 右ドラッグ:スクロール / ホイール:拡大縮小",
 };
 
 const cv = document.getElementById("cv");
@@ -98,12 +110,15 @@ const nameInput = document.getElementById("name");
 let board = null;                    // {width, height}
 const entities = new Map();          // id -> entity
 const terrain = new Map();           // "x,y" -> type
+const edges = new Map();             // "x,y,dir" -> type(dir: h=マスの上辺, v=マスの左辺)
 
 let mode = "piece";
 let color = COLORS[0];
 let brush = "wall";
+let edgeBrush = "wall";
 const view = { scale: 16, ox: 0, oy: 0 };  // screen = cell * scale + offset
 let hover = null;
+let hoverEdge = null;
 let drag = null;
 let clients = 0;
 
@@ -120,11 +135,20 @@ COLORS.forEach((c, i) => {
 const terrainEl = document.getElementById("terrainTools");
 TERRAINS.forEach(t => {
   const b = document.createElement("button");
-  b.className = "tile" + (t.id === null ? " floor" : "") + (t.id === brush ? " active" : "");
+  b.className = "tile" + (t.id === brush ? " active" : "");
   b.textContent = t.label;
-  if (t.id) b.style.background = `var(--t-${t.id})`;
+  if (t.id) b.style.setProperty("--swatch", `var(--t-${t.id})`);
   b.onclick = () => { brush = t.id; select(terrainEl, b); };
   terrainEl.appendChild(b);
+});
+const edgeEl = document.getElementById("edgeTools");
+EDGES.forEach(t => {
+  const b = document.createElement("button");
+  b.className = "tile" + (t.id === edgeBrush ? " active" : "");
+  b.textContent = t.label;
+  if (t.id) b.style.setProperty("--swatch", `var(--e-${t.id === "door_open" ? "door" : t.id})`);
+  b.onclick = () => { edgeBrush = t.id; select(edgeEl, b); };
+  edgeEl.appendChild(b);
 });
 function select(parent, btn) {
   parent.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === btn));
@@ -136,6 +160,7 @@ function setMode(m) {
   select(modesEl, modesEl.querySelector(`[data-mode="${m}"]`));
   document.getElementById("pieceTools").hidden = m !== "piece";
   terrainEl.hidden = m !== "terrain";
+  edgeEl.hidden = m !== "edge";
   document.getElementById("hint").textContent = HINTS[m];
   draw();
 }
@@ -181,6 +206,8 @@ function handle(msg) {
       msg.board.entities.forEach(e => entities.set(e.id, e));
       terrain.clear();
       msg.board.terrain.forEach(c => terrain.set(`${c.x},${c.y}`, c.terrain));
+      edges.clear();
+      msg.board.edges.forEach(e => setEdge(e));
       setConn(true);
       if (first) fit();
       break;
@@ -194,6 +221,9 @@ function handle(msg) {
       break;
     case "terrain.painted":
       msg.cells.forEach(c => setTerrain(c.x, c.y, c.terrain));
+      break;
+    case "edges.painted":
+      msg.edges.forEach(e => setEdge(e));
       break;
     case "presence":
       clients = msg.clients;
@@ -211,6 +241,50 @@ function* cellsBetween(a, b) {
   for (let i = 1; i <= n; i++) {
     yield { x: Math.round(a.x + (b.x - a.x) * i / n), y: Math.round(a.y + (b.y - a.y) * i / n) };
   }
+}
+
+function setEdge(e) {
+  const key = `${e.x},${e.y},${e.dir}`;
+  if (e.edge) edges.set(key, e.edge); else edges.delete(key);
+}
+
+// 画面座標に一番近い辺。lockDir を渡すとその向きの辺だけを返す(直線を引きやすくする)
+function pickEdge(sx, sy, lockDir) {
+  const fx = (sx - view.ox) / view.scale, fy = (sy - view.oy) / view.scale;
+  const dx = Math.abs(fx - Math.round(fx)), dy = Math.abs(fy - Math.round(fy));
+  let dir = lockDir;
+  if (!dir) {
+    if (Math.min(dx, dy) > 0.3) return null;
+    dir = dx < dy ? "v" : "h";
+  }
+  const e = dir === "v"
+    ? { x: Math.round(fx), y: Math.floor(fy), dir }
+    : { x: Math.floor(fx), y: Math.round(fy), dir };
+  return edgeInBoard(e) ? e : null;
+}
+function edgeInBoard(e) {
+  if (!board) return false;
+  const maxX = e.dir === "v" ? board.width : board.width - 1;
+  const maxY = e.dir === "h" ? board.height : board.height - 1;
+  return e.x >= 0 && e.y >= 0 && e.x <= maxX && e.y <= maxY;
+}
+
+let edgeQueue = [];
+let edgeTimer = null;
+function queueEdge(e, type) {
+  const key = `${e.x},${e.y},${e.dir}`;
+  if ((edges.get(key) ?? null) === type) return;
+  const item = { x: e.x, y: e.y, dir: e.dir, edge: type };
+  setEdge(item);
+  edgeQueue.push(item);
+  if (!edgeTimer) edgeTimer = setTimeout(flushEdges, 60);
+}
+function flushEdges() {
+  clearTimeout(edgeTimer);
+  edgeTimer = null;
+  if (!edgeQueue.length) return;
+  send({ op: "edges.paint", data: { edges: edgeQueue } });
+  edgeQueue = [];
 }
 
 function setTerrain(x, y, t) {
@@ -304,9 +378,17 @@ function draw() {
     ctx.stroke();
   }
 
+  // 仕切り
+  for (const [key, t] of edges) {
+    const [x, y, dir] = key.split(",");
+    drawEdge({ x: +x, y: +y, dir }, t, 1);
+  }
+
   // カーソル位置・移動先
   const target = drag?.type === "piece" ? drag.target : hover;
-  if (target && inBoard(target)) {
+  if (mode === "edge") {
+    if (hoverEdge) drawEdge(hoverEdge, edgeBrush ?? "erase", 0.5);
+  } else if (target && inBoard(target)) {
     const other = entityAt(target.x, target.y);
     const blocked = drag?.type === "piece" && other && other !== drag.entity;
     ctx.fillStyle = blocked ? "rgba(229,72,77,.3)" : "rgba(47,111,222,.2)";
@@ -329,6 +411,44 @@ function draw() {
     if (e) info += ` ・ ${e.name || "(名前なし)"}`;
   }
   statusEl.textContent = `マス ${info} ・ コマ ${entities.size} 個`;
+}
+
+function drawEdge(e, type, alpha) {
+  const s = view.scale;
+  const x1 = view.ox + e.x * s, y1 = view.oy + e.y * s;
+  const x2 = e.dir === "h" ? x1 + s : x1, y2 = e.dir === "h" ? y1 : y1 + s;
+  const w = Math.max(3, s * 0.2);
+  ctx.globalAlpha = alpha;
+  ctx.lineCap = "butt";
+  if (type === "wall" || type === "window") {
+    ctx.strokeStyle = css(`--e-${type}`);
+    ctx.lineWidth = type === "wall" ? w : w * 0.7;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    if (type === "window") {   // 窓は中央に細い線を入れてガラスっぽく
+      ctx.strokeStyle = css("--board");
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    }
+  } else if (type === "door" || type === "door_open") {
+    // 扉は辺の 8 割の長さの板。開いているときは枠だけ
+    const inset = s * 0.1;
+    const rx = e.dir === "h" ? x1 + inset : x1 - w / 2;
+    const ry = e.dir === "h" ? y1 - w / 2 : y1 + inset;
+    const rw = e.dir === "h" ? s - inset * 2 : w;
+    const rh = e.dir === "h" ? w : s - inset * 2;
+    ctx.fillStyle = ctx.strokeStyle = css("--e-door");
+    if (type === "door") {
+      ctx.fillRect(rx, ry, rw, rh);
+    } else {
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(rx + 0.75, ry + 0.75, rw - 1.5, rh - 1.5);
+    }
+  } else {                     // 消しゴムのプレビュー
+    ctx.strokeStyle = css("--ng");
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawEntity(e, cx, cy, alpha) {
@@ -358,6 +478,13 @@ cv.addEventListener("pointerdown", e => {
   const pan = { type: "pan", startX: sx, startY: sy, ox: view.ox, oy: view.oy, moved: false, cell, button: e.button };
 
   if (e.button !== 0) { drag = pan; return; }
+  if (mode === "edge") {
+    const edge = pickEdge(sx, sy);
+    drag = { type: "edge", startX: sx, startY: sy, lastX: sx, lastY: sy, dir: edge?.dir };
+    if (edge) queueEdge(edge, edgeBrush);
+    draw();
+    return;
+  }
   if (mode === "terrain") {
     drag = { type: "paint", startX: sx, startY: sy, last: cell };
     if (inBoard(cell)) queuePaint(cell);
@@ -373,7 +500,18 @@ cv.addEventListener("pointerdown", e => {
 cv.addEventListener("pointermove", e => {
   const { sx, sy } = eventPos(e);
   hover = toCell(sx, sy);
-  if (drag) {
+  hoverEdge = mode === "edge" ? pickEdge(sx, sy, drag?.type === "edge" ? drag.dir : null) : null;
+  if (drag?.type === "edge") {
+    // 前回位置から 1/4 マスごとに辺を拾い、速いドラッグでも抜けないようにする
+    const steps = Math.max(1, Math.ceil(Math.hypot(sx - drag.lastX, sy - drag.lastY) / (view.scale / 4)));
+    for (let i = 1; i <= steps; i++) {
+      const px = drag.lastX + (sx - drag.lastX) * i / steps;
+      const py = drag.lastY + (sy - drag.lastY) * i / steps;
+      const e = pickEdge(px, py, drag.dir);
+      if (e) { drag.dir = e.dir; queueEdge(e, edgeBrush); }
+    }
+    drag.lastX = sx; drag.lastY = sy;
+  } else if (drag) {
     if (Math.hypot(sx - drag.startX, sy - drag.startY) > 4) drag.moved = true;
     if (drag.type === "piece") {
       drag.sx = sx; drag.sy = sy; drag.target = hover;
@@ -393,7 +531,9 @@ cv.addEventListener("pointerup", () => {
   if (!drag) return;
   const d = drag;
   drag = null;
-  if (d.type === "paint") {
+  if (d.type === "edge") {
+    flushEdges();
+  } else if (d.type === "paint") {
     flushPaint();
   } else if (d.type === "piece" && d.moved) {
     const t = d.target;
@@ -401,6 +541,10 @@ cv.addEventListener("pointerup", () => {
     if (inBoard(t) && !other && send({ op: "entity.update", id: d.entity.id, data: { x: t.x, y: t.y } })) {
       d.entity.x = t.x; d.entity.y = t.y;   // 楽観的に動かし、拒否されたらスナップショットで戻る
     }
+  } else if (d.type === "piece" && !d.moved) {
+    toggleDoorAt(d.startX, d.startY);   // コマのいるマスの辺にある扉もクリックで開閉できる
+  } else if (d.type === "pan" && !d.moved && d.button === 0 && mode === "piece" && toggleDoorAt(d.startX, d.startY)) {
+    // 扉をクリックしたら開閉(コマの配置より優先)
   } else if (d.type === "pan" && !d.moved && inBoard(d.cell)) {
     const ent = entityAt(d.cell.x, d.cell.y);
     if (d.button === 2 && ent) {
@@ -412,7 +556,7 @@ cv.addEventListener("pointerup", () => {
   draw();
 });
 
-cv.addEventListener("pointerleave", () => { if (!drag) { hover = null; draw(); } });
+cv.addEventListener("pointerleave", () => { if (!drag) { hover = null; hoverEdge = null; draw(); } });
 
 cv.addEventListener("dblclick", e => {
   if (mode !== "piece") return;
@@ -421,6 +565,24 @@ cv.addEventListener("dblclick", e => {
   const ent = inBoard(cell) && entityAt(cell.x, cell.y);
   if (ent) deleteEntity(ent);
 });
+
+function toggleDoorAt(sx, sy) {
+  // 角の近くでは縦横どちらの辺か曖昧なので、近くの縦横両方から扉を探す
+  const fx = (sx - view.ox) / view.scale, fy = (sy - view.oy) / view.scale;
+  const near = [
+    [Math.abs(fx - Math.round(fx)), pickEdge(sx, sy, "v")],
+    [Math.abs(fy - Math.round(fy)), pickEdge(sx, sy, "h")],
+  ].filter(([d, e]) => e && d <= 0.3).sort((a, b) => a[0] - b[0]);
+  for (const [, e] of near) {
+    const t = edges.get(`${e.x},${e.y},${e.dir}`);
+    if (t === "door" || t === "door_open") {
+      queueEdge(e, t === "door" ? "door_open" : "door");
+      flushEdges();
+      return true;
+    }
+  }
+  return false;
+}
 
 function deleteEntity(ent) {
   if (send({ op: "entity.delete", id: ent.id })) { entities.delete(ent.id); draw(); }

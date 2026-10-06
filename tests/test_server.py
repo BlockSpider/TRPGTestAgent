@@ -18,7 +18,8 @@ def client(db_path):
 
 def test_empty_board(client):
     board = client.get("/board").json()
-    assert board == {"width": 50, "height": 50, "terrain": [], "entities": []}
+    assert board == {"width": 50, "height": 50, "terrain": [], "edges": [],
+                     "entities": []}
 
 
 def test_create_move_delete_entity(client):
@@ -119,3 +120,43 @@ def test_websocket_error_resends_snapshot(client):
         ws.send_json({"op": "nonsense"})
         assert ws.receive_json() == {"type": "error",
                                      "message": "invalid message"}
+
+
+def test_paint_edges(client):
+    r = client.put("/edges", json={"edges": [
+        {"x": 3, "y": 3, "dir": "h", "edge": "wall"},
+        {"x": 3, "y": 3, "dir": "v", "edge": "door"},
+        # 盤の右端・下端の辺も置ける
+        {"x": 50, "y": 49, "dir": "v", "edge": "window"},
+        {"x": 49, "y": 50, "dir": "h", "edge": "wall"}]})
+    assert r.status_code == 200
+    assert len(r.json()["edges"]) == 4
+    client.put("/edges", json={"edges": [
+        {"x": 3, "y": 3, "dir": "v", "edge": "door_open"},
+        {"x": 3, "y": 3, "dir": "h", "edge": None}]})
+    edges = client.get("/board").json()["edges"]
+    assert {"x": 3, "y": 3, "dir": "v", "edge": "door_open"} in edges
+    assert len(edges) == 3
+
+
+def test_rejects_bad_edges(client):
+    for edge in ({"x": 50, "y": 0, "dir": "h", "edge": "wall"},
+                 {"x": 0, "y": 50, "dir": "v", "edge": "wall"},
+                 {"x": -1, "y": 0, "dir": "v", "edge": "wall"}):
+        r = client.put("/edges", json={"edges": [edge]})
+        assert r.status_code == 409, edge
+    r = client.put("/edges", json={"edges": [
+        {"x": 0, "y": 0, "dir": "h", "edge": "curtain"}]})
+    assert r.status_code == 422
+
+
+def test_edges_persist_and_broadcast(db_path):
+    with TestClient(create_app(db_path)) as c:
+        with c.websocket_connect("/ws") as ws:
+            ws.receive_json()  # snapshot
+            ws.receive_json()  # presence
+            ws.send_json({"op": "edges.paint", "data": {"edges": [
+                {"x": 1, "y": 2, "dir": "v", "edge": "window"}]}})
+            assert ws.receive_json() == {"type": "edges.painted", "edges": [
+                {"x": 1, "y": 2, "dir": "v", "edge": "window"}]}
+    assert BoardStore(str(db_path)).edges == {(1, 2, "v"): "window"}

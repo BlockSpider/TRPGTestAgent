@@ -23,6 +23,7 @@ DEFAULT_DB = ROOT / "data" / "board.sqlite3"
 Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 Name = Annotated[str, Field(max_length=32)]
 Terrain = Optional[Literal["wall", "water", "rough", "high"]]
+EdgeType = Optional[Literal["wall", "window", "door", "door_open"]]
 
 
 # ---- リクエストの型 ----
@@ -57,6 +58,17 @@ class TerrainPaint(BaseModel):
     cells: list[Cell] = Field(max_length=2500)
 
 
+class Edge(BaseModel):
+    x: int
+    y: int
+    dir: Literal["h", "v"]
+    edge: EdgeType
+
+
+class EdgePaint(BaseModel):
+    edges: list[Edge] = Field(max_length=5100)
+
+
 # WebSocket でクライアントから届く操作
 class CreateOp(BaseModel):
     op: Literal["entity.create"]
@@ -79,8 +91,13 @@ class PaintOp(BaseModel):
     data: TerrainPaint
 
 
+class EdgePaintOp(BaseModel):
+    op: Literal["edges.paint"]
+    data: EdgePaint
+
+
 ClientOp = TypeAdapter(Annotated[
-    Union[CreateOp, UpdateOp, DeleteOp, PaintOp],
+    Union[CreateOp, UpdateOp, DeleteOp, PaintOp, EdgePaintOp],
     Field(discriminator="op")])
 
 
@@ -146,6 +163,14 @@ def create_app(db_path=None):
             await hub.broadcast({"type": "terrain.painted", "cells": applied})
         return applied
 
+    async def paint_edges(body: EdgePaint):
+        async with lock:
+            applied = store.paint_edges(
+                [(e.x, e.y, e.dir, e.edge) for e in body.edges])
+        if applied:
+            await hub.broadcast({"type": "edges.painted", "edges": applied})
+        return applied
+
     def http_error(exc):
         status = 404 if isinstance(exc, NotFound) else 409
         return HTTPException(status_code=status, detail=str(exc))
@@ -191,6 +216,13 @@ def create_app(db_path=None):
         except BoardError as exc:
             raise http_error(exc)
 
+    @app.put("/edges")
+    async def put_edges(body: EdgePaint):
+        try:
+            return {"edges": await paint_edges(body)}
+        except BoardError as exc:
+            raise http_error(exc)
+
     @app.get("/logs")
     def get_logs(limit: int = 50):
         return store.recent_logs(max(1, min(limit, 500)))
@@ -216,6 +248,8 @@ def create_app(db_path=None):
                         await delete_entity(op.id)
                     elif isinstance(op, PaintOp):
                         await paint(op.data)
+                    elif isinstance(op, EdgePaintOp):
+                        await paint_edges(op.data)
                 except (BoardError, ValidationError) as exc:
                     # 楽観的に更新したクライアントを正しい状態へ戻す
                     message = (str(exc) if isinstance(exc, BoardError)

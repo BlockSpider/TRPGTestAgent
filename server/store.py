@@ -7,6 +7,12 @@ from dataclasses import asdict, dataclass, field
 
 TERRAIN_TYPES = ("wall", "water", "rough", "high")
 
+# マスとマスの間(辺)に置く薄い仕切り
+EDGE_TYPES = ("wall", "window", "door", "door_open")
+# 辺の向き。"h" はマス (x, y) の上辺、"v" はマス (x, y) の左辺。
+# 盤の右端・下端は x == width の "v"、y == height の "h" で表す。
+EDGE_DIRS = ("h", "v")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS board (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -18,6 +24,13 @@ CREATE TABLE IF NOT EXISTS terrain (
     y INTEGER NOT NULL,
     type TEXT NOT NULL,
     PRIMARY KEY (x, y)
+);
+CREATE TABLE IF NOT EXISTS edges (
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    dir TEXT NOT NULL,
+    type TEXT NOT NULL,
+    PRIMARY KEY (x, y, dir)
 );
 CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +90,9 @@ class BoardStore:
         self.terrain = {
             (x, y): t for x, y, t in
             self.conn.execute("SELECT x, y, type FROM terrain")}
+        self.edges = {
+            (x, y, d): t for x, y, d, t in
+            self.conn.execute("SELECT x, y, dir, type FROM edges")}
         self.entities = {}
         for r in self.conn.execute(
                 "SELECT id, name, x, y, faction, color, stats, tags "
@@ -93,6 +109,9 @@ class BoardStore:
             "terrain": [
                 {"x": x, "y": y, "terrain": t}
                 for (x, y), t in sorted(self.terrain.items())],
+            "edges": [
+                {"x": x, "y": y, "dir": d, "edge": t}
+                for (x, y, d), t in sorted(self.edges.items())],
             "entities": [asdict(e) for e in self.entities.values()],
         }
 
@@ -181,7 +200,41 @@ class BoardStore:
             self.conn.commit()
         return applied
 
+    def paint_edges(self, edges):
+        """edges: (x, y, dir, type) の列。type が None なら仕切りを消す."""
+        applied = []
+        for x, y, d, t in edges:
+            self._check_edge(x, y, d)
+            if t is not None and t not in EDGE_TYPES:
+                raise BoardError(f"unknown edge type: {t}")
+            if self.edges.get((x, y, d)) == t:
+                continue
+            if t is None:
+                self.edges.pop((x, y, d), None)
+                self.conn.execute(
+                    "DELETE FROM edges WHERE x = ? AND y = ? AND dir = ?",
+                    (x, y, d))
+            else:
+                self.edges[(x, y, d)] = t
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO edges (x, y, dir, type) "
+                    "VALUES (?, ?, ?, ?)", (x, y, d, t))
+            applied.append({"x": x, "y": y, "dir": d, "edge": t})
+        if applied:
+            self._log("edges.paint", {"edges": applied})
+        else:
+            self.conn.commit()
+        return applied
+
     # ---- 内部 ----
+
+    def _check_edge(self, x, y, d):
+        if d not in EDGE_DIRS:
+            raise BoardError(f"unknown edge dir: {d}")
+        max_x = self.width if d == "v" else self.width - 1
+        max_y = self.height if d == "h" else self.height - 1
+        if not (0 <= x <= max_x and 0 <= y <= max_y):
+            raise BoardError(f"edge ({x}, {y}, {d}) is outside the board")
 
     def _check_bounds(self, x, y):
         if not (0 <= x < self.width and 0 <= y < self.height):
